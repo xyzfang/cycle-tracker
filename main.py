@@ -1,409 +1,282 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import json
+import os
 from datetime import date, datetime, timedelta
 
 # ==========================================
-# 核心逻辑类 (原 cycle_model.py 内容)
+# 配置与常量
+# ==========================================
+DATA_FILE = "cycle_data.json"  # 升级为 JSON 文件存储
+
+# ==========================================
+# 核心逻辑类 (CycleModel)
 # ==========================================
 class CycleModel:
     """
-    Handles the logic for menstrual cycle tracking, prediction, and risk assessment.
-    Core requirement: 4-phase model, non-medical, rule-based.
+    处理经期追踪、预测的核心逻辑。
     """
-
     def __init__(self, age: int):
         self.age = age
-        self.min_cycle_days = 21
-        self.max_cycle_days = 40
-        # Age-based thresholds
-        self._adjust_thresholds_by_age()
-
-    def _adjust_thresholds_by_age(self):
-        """
-        Adjusts strictness based on age groups defined in the prompt.
-        """
+        # 根据年龄调整容忍度
         if self.age < 18:
-            # Teenage: irregular is common
-            self.irregularity_tolerance_days = 5
+            self.irregularity_tolerance = 5
         elif 18 <= self.age <= 35:
-            # Typical reproductive: strict
-            self.irregularity_tolerance_days = 3
-        elif 36 <= self.age <= 45:
-            # Late reproductive
-            self.irregularity_tolerance_days = 4
+            self.irregularity_tolerance = 3
         else:
-            # Perimenopause: very unpredictable
-            self.irregularity_tolerance_days = 7
+            self.irregularity_tolerance = 5
 
-    def analyze_history(self, dates: list, typical_length: int = 28):
-        """
-        Analyzes a list of period start dates.
-        Returns a dictionary with stats (avg, std, history_count).
-        """
+    def analyze_history(self, dates: list):
+        """分析历史数据，计算平均周期长度"""
         if not dates:
-            return {
-                "avg_length": typical_length,
-                "std_dev": 0.0,
-                "count": 0,
-                "lengths": []
-            }
+            return {"avg_length": 28, "std_dev": 0, "history": []}
 
-        # Sort dates to be sure
-        dates = sorted([d for d in dates if d is not None])
+        # 确保日期排序
+        sorted_dates = sorted([datetime.strptime(d, "%Y-%m-%d").date() if isinstance(d, str) else d for d in dates])
         
-        # Calculate cycle lengths (diff between consecutive starts)
+        cycles_data = []
         lengths = []
-        for i in range(1, len(dates)):
-            delta = (dates[i] - dates[i-1]).days
-            if 15 < delta < 100: # Filter out obvious data entry errors (e.g. typos)
-                lengths.append(delta)
-
+        
+        # 计算每次周期的间隔
+        for i in range(len(sorted_dates) - 1):
+            current = sorted_dates[i]
+            next_start = sorted_dates[i+1]
+            length = (next_start - current).days
+            
+            # 过滤掉异常数据（比如记录错误的间隔）
+            if 15 < length < 100:
+                lengths.append(length)
+                cycles_data.append({
+                    "start_date": current,
+                    "end_date": next_start,
+                    "length": length
+                })
+        
+        # 如果只有一次记录，无法计算间隔
         if not lengths:
-            # If we have dates but no intervals (e.g. only 1 date), use fallback
             return {
-                "avg_length": typical_length,
-                "std_dev": 0.0,
-                "count": len(dates),
-                "lengths": []
+                "avg_length": 28, 
+                "std_dev": 0, 
+                "last_date": sorted_dates[-1],
+                "history": []
             }
 
-        avg_len = np.mean(lengths)
-        std_dev = np.std(lengths) if len(lengths) > 1 else 0.0
-
         return {
-            "avg_length": float(avg_len),
-            "std_dev": float(std_dev),
-            "count": len(dates),
-            "lengths": lengths,
-            "last_date": dates[-1]
+            "avg_length": float(np.mean(lengths)),
+            "std_dev": float(np.std(lengths)),
+            "last_date": sorted_dates[-1],
+            "history": cycles_data # 返回详细的周期历史
         }
 
-    def predict_phases(self, last_period_date: datetime.date, avg_length: float):
-        """
-        Determines current phase and predicts next dates based on the 4-phase model.
-        Phase rules (scaled to avg_length if needed, but fixed for simplicity as requested):
-        - Menstrual: 1-5
-        - Follicular: 6-13
-        - Ovulation: 14-15
-        - Luteal: 16-End
-        """
-        if not last_period_date:
+    def predict(self, last_date, avg_len):
+        """预测下一次经期和排卵日"""
+        if not last_date:
             return None
-
-        today = datetime.now().date()
-        days_since_last = (today - last_period_date).days
-        current_cycle_day = days_since_last + 1
         
-        # Round avg_length for calculations
-        cycle_len = int(round(avg_length))
+        cycle_len = int(round(avg_len))
+        next_period = last_date + timedelta(days=cycle_len)
+        ovulation = next_period - timedelta(days=14) # 简易算法：下次经期前14天
         
-        # Determine Phase
-        phase = "Unknown"
-        if 1 <= current_cycle_day <= 5:
-            phase = "Menstrual Phase"
-        elif 6 <= current_cycle_day <= 13:
-            phase = "Follicular Phase"
-        elif 14 <= current_cycle_day <= 15:
-            phase = "Ovulation Phase"
-        elif 16 <= current_cycle_day <= cycle_len:
-            phase = "Luteal Phase"
-        elif current_cycle_day > cycle_len:
-            phase = "Late / Delayed"
-        else:
-            phase = "Future date selected?"
-
-        # Predictions
-        next_period_start = last_period_date + timedelta(days=cycle_len)
+        today = date.today()
+        days_passed = (today - last_date).days + 1
         
-        # Ovulation estimation: Usually 14 days before the NEXT period
-        # Est. Ovulation Day = Cycle Length - 14
-        ovulation_day_index = cycle_len - 14
-        ovulation_date = last_period_date + timedelta(days=ovulation_day_index)
-        
+        # 判断当前阶段
+        if days_passed <= 5: phase = "月经期 (Menstrual)"
+        elif days_passed <= (cycle_len - 15): phase = "卵泡期 (Follicular)"
+        elif days_passed <= (cycle_len - 13): phase = "排卵期 (Ovulation)"
+        elif days_passed < cycle_len: phase = "黄体期 (Luteal)"
+        else: phase = "经期推迟 (Delayed)"
+            
         return {
-            "current_day": current_cycle_day,
+            "next_date": next_period,
+            "ovulation_date": ovulation,
             "current_phase": phase,
-            "next_period_start": next_period_start,
-            "est_ovulation_date": ovulation_date,
-            "days_since_last": days_since_last
+            "day_in_cycle": days_passed
         }
 
-    def calculate_regularity_score(self, stats: dict):
-        """
-        Calculates a simple 0-100 score.
-        """
-        score = 80 # Baseline
-        lengths = stats.get("lengths", [])
-        std_dev = stats.get("std_dev", 0)
+# ==========================================
+# 数据管理 (JSON)
+# ==========================================
+def load_data():
+    """加载 JSON 数据，如果不存在则返回默认结构"""
+    default_data = {"dates": [], "logs": {}}
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return default_data
+    return default_data
 
-        if not lengths:
-            return 80, "Insufficient Data"
-
-        # Penalty for high standard deviation
-        # If std is higher than tolerance, subtract points
-        if std_dev > self.irregularity_tolerance_days:
-            excess = std_dev - self.irregularity_tolerance_days
-            score -= (excess * 5) # Steep penalty
-
-        # Penalty for very short or very long cycles
-        short_cycles = sum(1 for l in lengths if l < self.min_cycle_days)
-        long_cycles = sum(1 for l in lengths if l > self.max_cycle_days)
-        
-        score -= (short_cycles * 10)
-        score -= (long_cycles * 10)
-
-        # Clamp score
-        score = max(0, min(100, int(score)))
-
-        # Label
-        if score >= 80:
-            label = "Relatively Regular"
-        elif 50 <= score < 80:
-            label = "Moderate Variability"
-        else:
-            label = "High Variability"
-
-        return score, label
-
-    def generate_hints(self, stats: dict, prediction: dict):
-        """
-        Generates safe, conservative text hints.
-        """
-        hints = []
-        lengths = stats.get("lengths", [])
-        
-        # 1. Long cycles warning
-        long_cycles = sum(1 for l in lengths if l > self.max_cycle_days)
-        if long_cycles >= 2:
-            hints.append(f"⚠️ You have recorded {long_cycles} cycles longer than {self.max_cycle_days} days. This can be normal, but worth monitoring.")
-
-        # 2. Short cycles warning
-        short_cycles = sum(1 for l in lengths if l < self.min_cycle_days)
-        if short_cycles >= 2:
-            hints.append(f"⚠️ You have recorded {short_cycles} cycles shorter than {self.min_cycle_days} days.")
-
-        # 3. Missed period warning (90 days rule)
-        if prediction:
-            days_since = prediction["days_since_last"]
-            if days_since > 90:
-                hints.append("❗ It has been over 90 days since your last recorded period. If this is unexpected, please consider consulting a doctor or taking a pregnancy test.")
-
-        # 4. Age specific context
-        if self.age < 18:
-            hints.append("ℹ️ At your age (under 18), cycle variability is often normal as your body adjusts.")
-        elif self.age > 45:
-            hints.append("ℹ️ At your age (45+), changes in cycle length may be related to perimenopause.")
-
-        return hints
-
+def save_data(data):
+    """保存数据到 JSON"""
+    try:
+        with open(DATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        st.error(f"保存失败: {e}")
 
 # ==========================================
-# 界面与交互代码 (原 main.py 内容)
+# 界面主程序
 # ==========================================
-
-# --- Configuration & Setup ---
-st.set_page_config(
-    page_title="CycleTracker AI",
-    page_icon="🌸",
-    layout="wide"
-)
-
-# --- Helper Functions ---
-def local_css():
+def main():
+    st.set_page_config(page_title="CycleTracker Pro", page_icon="🌺", layout="wide")
+    
+    # CSS 美化
     st.markdown("""
     <style>
-    .phase-box {
-        padding: 20px;
-        border-radius: 10px;
-        background-color: #f0f2f6;
-        text-align: center;
-        margin-bottom: 20px;
-    }
-    .warning-box {
-        padding: 15px;
-        border-radius: 5px;
-        background-color: #ffecd1;
-        border-left: 5px solid #ff9800;
-        color: #663c00;
-        margin-bottom: 10px;
-    }
-    .disclaimer {
-        font-size: 0.8em;
-        color: #666;
-        border-top: 1px solid #ddd;
-        padding-top: 10px;
-        margin-top: 50px;
-    }
+    .kpi-card { background-color: #f9f9f9; padding: 15px; border-radius: 10px; text-align: center; border: 1px solid #eee; }
+    .highlight { color: #e91e63; font-weight: bold; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- Main App ---
-def main():
-    local_css()
+    st.title("🌺 智能周期助手 V2.0")
 
-    st.title("🌸 Menstrual Cycle Tracker")
-    st.markdown("**Personalized insights based on your history.**")
+    # --- 1. 数据初始化 ---
+    if 'data' not in st.session_state:
+        st.session_state.data = load_data()
 
-    # --- Sidebar: User Input ---
+    data = st.session_state.data
+    period_dates = data.get("dates", [])
+    daily_logs = data.get("logs", {})
+
+    # --- 2. 侧边栏：设置与记录 ---
     with st.sidebar:
-        st.header("Profile & Settings")
+        st.header("⚙️ 个人设置")
+        age = st.slider("年龄", 12, 60, 25)
         
-        # 1. Basic Info
-        age = st.number_input("Age", min_value=12, max_value=60, value=25)
+        st.divider()
+        st.header("📅 经期记录")
         
-        with st.expander("Physical Stats (Optional)"):
-            height = st.number_input("Height (cm)", 100, 250, 165)
-            weight = st.number_input("Weight (kg)", 30, 200, 60)
-            if height > 0:
-                bmi = weight / ((height/100)**2)
-                st.caption(f"Estimated BMI: {bmi:.1f}")
-
-        # 2. Lifestyle
-        st.subheader("Lifestyle Indicators")
-        stress = st.select_slider("Stress Level", options=["Low", "Medium", "High"], value="Medium")
-        sleep = st.select_slider("Sleep Quality", options=["Poor", "Normal", "Good"], value="Normal")
-        
-        st.text_area("Known Conditions (Notes only)", placeholder="e.g. PCOS, thyroid (for your reference)")
-
-        # 3. Menstrual History
-        st.header("Cycle History")
-        st.info("Please enter the start dates of your last few periods.")
-        
-        # Initialize session state for dates if not present
-        if 'period_dates' not in st.session_state:
-            # Default: specific dates for demo purposes
-            st.session_state.period_dates = [
-                date.today() - timedelta(days=28),
-                date.today() - timedelta(days=57),
-                date.today() - timedelta(days=86)
-            ]
-
-        # Date Input Widget (Multi-date picker is tricky in basic Streamlit, using a list approach)
-        # For simplicity in this demo, we let user pick a date and add it button style
-        new_date = st.date_input("Add a Period Start Date", value=date.today())
+        # A. 添加经期开始日
+        new_date = st.date_input("记录经期开始日期", value=date.today())
+        str_date = new_date.strftime("%Y-%m-%d")
         
         col1, col2 = st.columns(2)
-        if col1.button("Add Date"):
-            if new_date not in st.session_state.period_dates:
-                st.session_state.period_dates.append(new_date)
-                st.success("Date added!")
+        if col1.button("➕ 标记今天来了"):
+            if str_date not in period_dates:
+                period_dates.append(str_date)
+                period_dates.sort()
+                st.session_state.data["dates"] = period_dates
+                save_data(st.session_state.data)
+                st.success("已记录！")
+                st.rerun()
         
-        if col2.button("Clear All"):
-            st.session_state.period_dates = []
+        if col2.button("撤销最近一次"):
+            if period_dates:
+                period_dates.pop()
+                st.session_state.data["dates"] = period_dates
+                save_data(st.session_state.data)
+                st.rerun()
 
-        # Display current list
-        st.write("Recorded Dates:")
-        sorted_dates = sorted(st.session_state.period_dates, reverse=True)
-        st.dataframe(pd.DataFrame(sorted_dates, columns=["Start Date"]), height=150)
-
-        fallback_len = st.number_input("Typical Cycle Length (Fallback)", 21, 45, 28)
-
-    # --- Logic Processing ---
-    model = CycleModel(age=age)
-    
-    # Analyze History
-    stats = model.analyze_history(st.session_state.period_dates, typical_length=fallback_len)
-    avg_len = stats['avg_length']
-    std_dev = stats['std_dev']
-    last_date = stats.get('last_date')
-
-    # Predictions
-    prediction = model.predict_phases(last_date, avg_len)
-    
-    # Scores
-    score, regularity_label = model.calculate_regularity_score(stats)
-    
-    # Hints
-    hints = model.generate_hints(stats, prediction)
-
-    # --- Main Dashboard ---
-    
-    # 1. Top KPI Row
-    kpi1, kpi2, kpi3 = st.columns(3)
-    kpi1.metric("Average Cycle", f"{avg_len:.1f} days", f"± {std_dev:.1f} days")
-    
-    if prediction:
-        kpi2.metric("Current Phase", prediction['current_phase'], f"Day {prediction['current_day']}")
-        kpi3.metric("Next Period", f"{prediction['next_period_start']}")
-    else:
-        kpi2.metric("Current Phase", "No Data")
-        kpi3.metric("Next Period", "--")
-
-    st.divider()
-
-    # 2. Phase Visualization & Status
-    if prediction:
-        st.subheader("Current Cycle Timeline")
+        st.divider()
+        st.header("📝 每日打卡")
+        # B. 每日症状记录
+        log_date = st.date_input("选择打卡日期", value=date.today(), key="log_picker")
+        log_key = log_date.strftime("%Y-%m-%d")
         
-        # Simple visual representation
-        # Progress bar logic: cap at 100%
-        progress = min(1.0, prediction['current_day'] / avg_len)
-        st.progress(progress)
+        # 获取当天的旧记录（如果有）
+        today_log = daily_logs.get(log_key, {})
         
-        # Phase Descriptions
-        phase_cols = st.columns(4)
-        phases = ["Menstrual (1-5)", "Follicular (6-13)", "Ovulation (14-15)", "Luteal (16+)"]
-        current_p = prediction['current_phase']
+        flow = st.select_slider("经期流量", options=["无", "少量", "中等", "大量"], value=today_log.get("flow", "无"))
+        pain = st.select_slider("痛经程度", options=["无痛", "轻微", "明显", "剧烈"], value=today_log.get("pain", "无痛"))
+        mood = st.selectbox("今日心情", ["平静", "开心", "烦躁", "焦虑", "疲惫"], index=0)
+        note = st.text_input("备注", value=today_log.get("note", ""))
         
-        for i, p_name in enumerate(phases):
-            # Highlight current phase
-            is_active = False
-            if "Menstrual" in current_p and i == 0: is_active = True
-            elif "Follicular" in current_p and i == 1: is_active = True
-            elif "Ovulation" in current_p and i == 2: is_active = True
-            elif "Luteal" in current_p and i == 3: is_active = True
+        if st.button("💾 保存今日日记"):
+            st.session_state.data["logs"][log_key] = {
+                "flow": flow,
+                "pain": pain,
+                "mood": mood,
+                "note": note
+            }
+            save_data(st.session_state.data)
+            st.success("打卡成功！")
+
+    # --- 3. 核心计算 ---
+    model = CycleModel(age)
+    stats = model.analyze_history(period_dates)
+    
+    # 预测逻辑
+    prediction = None
+    if stats.get("last_date"):
+        prediction = model.predict(stats["last_date"], stats["avg_length"])
+
+    # --- 4. 主界面展示 ---
+    
+    # 顶部仪表盘
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.markdown(f"<div class='kpi-card'>平均周期<br><span class='highlight' style='font-size:24px'>{stats['avg_length']:.1f} 天</span></div>", unsafe_allow_html=True)
+    with col2:
+        phase_text = prediction['current_phase'] if prediction else "无数据"
+        st.markdown(f"<div class='kpi-card'>当前阶段<br><span class='highlight' style='font-size:24px'>{phase_text}</span></div>", unsafe_allow_html=True)
+    with col3:
+        day_text = f"第 {prediction['day_in_cycle']} 天" if prediction else "--"
+        st.markdown(f"<div class='kpi-card'>周期进度<br><span class='highlight' style='font-size:24px'>{day_text}</span></div>", unsafe_allow_html=True)
+    with col4:
+        next_text = str(prediction['next_date']) if prediction else "--"
+        st.markdown(f"<div class='kpi-card'>预计下次<br><span class='highlight' style='font-size:24px'>{next_text}</span></div>", unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # 两个主要板块：分析 vs 日志
+    tab1, tab2 = st.tabs(["📊 周期历史分析", "📖 身体日记"])
+
+    with tab1:
+        if stats["history"]:
+            st.subheader("历史周期规律")
+            # 将历史数据转为 DataFrame 方便展示
+            history_df = pd.DataFrame(stats["history"])
+            # 格式化一下显示
+            display_df = history_df[["start_date", "length"]].copy()
+            display_df.columns = ["开始日期", "周期长度 (天)"]
+            display_df["开始日期"] = pd.to_datetime(display_df["开始日期"]).dt.strftime('%Y-%m-%d')
             
-            box_bg = "background-color: #ffcdd2;" if is_active else "background-color: #f0f2f6; opacity: 0.5;"
-            border = "border: 2px solid #e91e63;" if is_active else "border: 1px solid #ddd;"
+            # 使用柱状图展示周期波动
+            st.bar_chart(display_df.set_index("开始日期"))
             
-            phase_cols[i].markdown(f"""
-            <div style="{box_bg} {border} padding: 10px; border-radius: 5px; text-align: center; font-size: 0.8em;">
-                <b>{p_name}</b>
-            </div>
-            """, unsafe_allow_html=True)
+            st.table(display_df.sort_values("开始日期", ascending=False))
             
-        st.caption(f"Estimated Ovulation Window: Around {prediction['est_ovulation_date']}")
-
-    # 3. Regularity & Health Insights
-    st.divider()
-    st.subheader("Cycle Health Insights")
-    
-    col_score, col_hints = st.columns([1, 2])
-    
-    with col_score:
-        st.write("**Regularity Score**")
-        st.title(f"{score}/100")
-        
-        color = "green"
-        if score < 50: color = "red"
-        elif score < 80: color = "orange"
-        
-        st.markdown(f"<span style='color:{color}; font-weight:bold'>{regularity_label}</span>", unsafe_allow_html=True)
-        st.caption("Based on consistency of cycle length.")
-
-    with col_hints:
-        st.write("**Observations & Hints**")
-        if hints:
-            for hint in hints:
-                st.markdown(f"<div class='warning-box'>{hint}</div>", unsafe_allow_html=True)
+            if stats["std_dev"] > 5:
+                st.warning(f"⚠️ 你的周期波动较大 (标准差 {stats['std_dev']:.1f} 天)，建议多观察作息。")
+            else:
+                st.success(f"✅ 你的周期比较规律 (波动 ±{stats['std_dev']:.1f} 天)。")
         else:
-            st.success("No unusual patterns detected based on current data.")
-            
-        if stress == "High" or sleep == "Poor":
-            st.info("💡 Note: High stress or poor sleep can often delay your cycle or make it irregular.")
+            st.info("暂无足够的历史周期数据，请在左侧侧边栏添加至少 2 次经期记录。")
 
-    # --- Footer / Disclaimer (CRITICAL) ---
-    st.markdown("""
-    <div class='disclaimer'>
-        <h3>⚠️ IMPORTANT DISCLAIMER</h3>
-        <p>This tool is for <b>personal tracking and general reference only</b>. It is <b>NOT</b> a medical device, diagnostic tool, or contraceptive aid.</p>
-        <p>The predictions are estimates based on averages and may not reflect your actual physiology. 
-        <b>Do not rely on this app for preventing pregnancy or specific medical decisions.</b></p>
-        <p>If you have concerns about your health, pain, or irregularity, please consult a professional doctor.</p>
-        <p><i>Data Privacy: All data entered here is processed locally in this session and is not sent to any external server.</i></p>
-    </div>
-    """, unsafe_allow_html=True)
+    with tab2:
+        st.subheader("我的身体记录")
+        if daily_logs:
+            # 将日记字典转为 DataFrame
+            logs_list = []
+            for d, info in daily_logs.items():
+                row = {"日期": d}
+                row.update(info)
+                logs_list.append(row)
+            
+            logs_df = pd.DataFrame(logs_list)
+            logs_df = logs_df.sort_values("日期", ascending=False)
+            
+            st.dataframe(
+                logs_df,
+                column_config={
+                    "日期": "日期",
+                    "flow": "流量",
+                    "pain": "痛感",
+                    "mood": "心情",
+                    "note": "备注"
+                },
+                use_container_width=True
+            )
+        else:
+            st.write("还没有日记哦，快去左侧打卡吧！")
+
+    # --- Footer ---
+    st.markdown("---")
+    st.caption("🔒 隐私保护：所有数据以 JSON 格式存储在本地，未上传云端。")
 
 if __name__ == "__main__":
     main()
