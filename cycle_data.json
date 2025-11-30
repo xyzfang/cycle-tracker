@@ -1,6 +1,47 @@
 {
-    "dates": [
-        "2025-10-25"
-    ],
-    "logs": {}
+    "users": {
+        "1": {
+            "password": "9fb693b383f51f753057180f0bc9b43561008c44beab36327346de6796cb72e9",
+            "profile": {
+                "age": 25
+            },
+            "cycle_data": {
+                "dates": [],
+                "logs": {}
+            }
+        },
+        "laurence": {
+            "password": "9fb693b383f51f753057180f0bc9b43561008c44beab36327346de6796cb72e9",
+            "profile": {
+                "age": 25
+            },
+            "cycle_data": {
+                "dates": [
+                    "2025-10-25"
+                ],
+                "logs": {
+                    "2025-11-30": {
+                        "primary_mood": "开心",
+                        "secondary_moods": [],
+                        "energy": 60,
+                        "symptoms": [],
+                        "meds": [],
+                        "note": ""
+                    },
+                    "2025-10-24": {
+                        "moods": [
+                            "性欲高涨",
+                            "疲惫",
+                            "易怒",
+                            "悲伤/想哭",
+                            "自我怀疑"
+                        ],
+                        "flow": "无",
+                        "bbt": 36.5,
+                        "note": ""
+                    }
+                }
+            }
+        }
+    }
 }
